@@ -9,7 +9,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -104,6 +104,7 @@ describe('fixture server — controlled scenarios', () => {
     args: [fixtureServerPath],
     env: {},
     cwd: packageDir,
+    cwdFromSession: false,
     toolCallTimeoutMs: 15_000,
     failOnStartupError: false,
   }
@@ -203,6 +204,7 @@ describe('fixture server — duplicate serverName', () => {
       args: [fixtureServerPath],
       env: {},
       cwd: packageDir,
+      cwdFromSession: false,
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
     }
@@ -225,6 +227,7 @@ describe('fixture server — disposal', () => {
       args: [fixtureServerPath],
       env: {},
       cwd: packageDir,
+      cwdFromSession: false,
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
     })
@@ -248,6 +251,7 @@ describe('fixture server — crash recovery', () => {
       args: [fixtureServerPath],
       env: {},
       cwd: packageDir,
+      cwdFromSession: false,
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
       reconnect,
@@ -320,6 +324,75 @@ describe('fixture server — crash recovery', () => {
   }, 30_000)
 })
 
+// ---- per-session working directory ----
+
+describe('per-session working directory', () => {
+  let ctx: Context
+  let first: string
+  let second: string
+
+  const poolConfig: Config = {
+    transport: 'stdio',
+    serverName: 'pooled',
+    command: process.execPath,
+    args: [fixtureServerPath],
+    env: {},
+    cwd: packageDir,
+    cwdFromSession: true,
+    toolCallTimeoutMs: 15_000,
+    failOnStartupError: false,
+  }
+
+  /** Ask the serving child to identify itself, optionally on behalf of a session directory. */
+  async function whereIn(cwd?: string): Promise<{ cwd: string; pid: number }> {
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: nextCallId(),
+      name: 'mcp__pooled__where',
+      arguments: {},
+      ...cwd === undefined
+        ? {}
+        : { agent: { options: {}, session: { header: { cwd }, requestHeader: () => undefined } } as never },
+    })
+    expect(result.isError).toBe(false)
+    return JSON.parse(textOf(result.content[0])) as { cwd: string; pid: number }
+  }
+
+  beforeAll(async () => {
+    // realpath because the fixture reports getcwd(), which resolves the
+    // /var → /private/var symlink macOS puts in tmpdir().
+    first = await realpath(await mkdtemp(join(tmpdir(), 'mcp-cwd-a-')))
+    second = await realpath(await mkdtemp(join(tmpdir(), 'mcp-cwd-b-')))
+    ctx = await mountRegistry()
+    await apply(ctx, poolConfig)
+  }, 30_000)
+
+  afterAll(async () => {
+    if (ctx) await ctx.fiber.dispose()
+    await rm(first, { recursive: true, force: true })
+    await rm(second, { recursive: true, force: true })
+  })
+
+  it('spawns one child per session directory and reuses it', async () => {
+    const inFirst = await whereIn(first)
+    expect(inFirst.cwd).toBe(first)
+
+    // The same directory is served by the same child process.
+    expect((await whereIn(first)).pid).toBe(inFirst.pid)
+
+    // A different directory is a different child running in that directory.
+    const inSecond = await whereIn(second)
+    expect(inSecond.cwd).toBe(second)
+    expect(inSecond.pid).not.toBe(inFirst.pid)
+
+    // A call without a session uses the configured fallback directory.
+    const fallback = await whereIn()
+    expect(fallback.cwd).toBe(await realpath(packageDir))
+    expect(fallback.pid).not.toBe(inFirst.pid)
+    expect(fallback.pid).not.toBe(inSecond.pid)
+  }, 30_000)
+})
+
 // ---- @modelcontextprotocol/server-everything ----
 
 describe('server-everything — official test server', () => {
@@ -332,6 +405,7 @@ describe('server-everything — official test server', () => {
     args: ['stdio'],
     env: {},
     cwd: '',
+    cwdFromSession: false,
     toolCallTimeoutMs: 30_000,
     failOnStartupError: false,
   }
@@ -401,6 +475,7 @@ describe('server-filesystem — real filesystem operations', () => {
       args: [tempDir],
       env: {},
       cwd: '',
+      cwdFromSession: false,
       toolCallTimeoutMs: 30_000,
       failOnStartupError: false,
     }

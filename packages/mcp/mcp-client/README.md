@@ -57,6 +57,7 @@ Add one entry per server; nothing else is required. After the harness starts, th
 | `transport` | required | `stdio` or `streamable-http` |
 | `serverName` | required | Namespace for the server's tool names; `[A-Za-z0-9_-]{1,32}`, unique inside one registration scope |
 | `command` / `args` / `env` / `cwd` | — | stdio: executable, arguments, extra env merged over scrubbed ambient env, working directory |
+| `cwdFromSession` | `false` | stdio: spawn one child per session working directory, created on first use; `cwd` is then the fallback for calls without a session |
 | `url` / `headers` | — | streamable-http: endpoint URL and extra request headers |
 | `toolCallTimeoutMs` | `60,000` | Timeout per `tools/call` invocation |
 | `failOnStartupError` | `false` | Reject plugin activation when the initial connection or tool synchronization fails |
@@ -68,6 +69,10 @@ Add one entry per server; nothing else is required. After the harness starts, th
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-mcp-client) is the exhaustive source for every accepted field.
 
 After startup, the server's tools appear as `mcp__<serverName>__<tool>` — try a prompt that uses one. If the initial connection fails, the harness still starts but no tools from that server appear, and an error is logged; set `failOnStartupError: true` to make a startup failure abort the harness instead.
+
+### Working directory per session
+
+A stdio server that derives its own project from the working directory — a memory or repository server, for example — sees the harness process's directory by default, which is not the directory of the session making the call. Set `cwdFromSession: true` to spawn one child per session working directory instead: the first call from a session starts a child in that session's directory, later calls from the same directory reuse it, and a call without a session uses `cwd`. Each child keeps its own connection and reconnect state, and disposal closes every one of them. The tools published to the model still come from the fallback connection, so the model-visible tool set does not depend on which directories sessions use.
 
 ### Tool naming and coexistence
 
@@ -115,13 +120,14 @@ This section explains the design decisions behind the bridge and points at the c
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `Config` schema, `serverName` reservation, activation await |
 | [`src/connection.ts`](src/connection.ts) | Connection supervisor: client generations, reconnect policy, attempt budget, disposal |
+| [`src/pool.ts`](src/pool.ts) | Per-directory pool: the publishing fallback connection plus one private connection per session working directory |
 | [`src/tools.ts`](src/tools.ts) | Tool bridge: discovery, naming, registration swap, execution, image projection |
 | [`src/transport.ts`](src/transport.ts) | Transport factory: stdio spawn with scrubbed env, Streamable HTTP |
 | — | No runtime invariant companion is published; MCP generations contribute through the tool registry, but the bridge exposes no independent server-to-tool snapshot after an asynchronous resync. |
 
 ### Lifecycle and sync
 
-`apply` resolves the reconnect policy, reserves the `serverName` inside the current registration scope, starts the supervisor, and awaits the initial connection plus discovery. Independent Agent scopes may reuse the same namespace because their tools and transports are isolated; a duplicate inside one scope fails at load. The supervisor serializes every sync — initial, notification, and reconnect — through one queue so two syncs can never interleave their dispose-previous/register-next swap. Disposal cancels pending reconnects, closes the live client, waits for the in-flight attempt and queued syncs to quiesce, and unregisters the current generation.
+`apply` resolves the reconnect policy, reserves the `serverName` inside the current registration scope, starts the supervisor, and awaits the initial connection plus discovery. Independent Agent scopes may reuse the same namespace because their tools and transports are isolated; a duplicate inside one scope fails at load. Under `cwdFromSession`, `apply` starts the pool instead: the fallback connection publishes the tool surface, and each session working directory receives a private connection on its first call, disposed with the plugin. The supervisor serializes every sync — initial, notification, and reconnect — through one queue so two syncs can never interleave their dispose-previous/register-next swap. Disposal cancels pending reconnects, closes the live client, waits for the in-flight attempt and queued syncs to quiesce, and unregisters the current generation.
 
 The supervisor listens for `notifications/tools/list_changed` and queues a re-sync; a fetch-phase failure keeps the previous generation registered, while a registration conflict rolls back the attempted generation. Each outage shares one attempt budget: after `maxAttempts` consecutive failures the tools are unregistered and reconnection stops, and a connection that stays up past `maxDelayMs` resets the budget.
 
@@ -157,7 +163,7 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-After initial discovery succeeds, every advertised MCP tool appears as a native tool named `mcp__<serverName>__<rawName>` (or its deterministic normalized form) with the server-provided description and input schema. A successful re-sync — including the one after an automatic reconnect — replaces the generation; plugin disposal or an exhausted reconnect budget removes it.
+After initial discovery succeeds, every advertised MCP tool appears as a native tool named `mcp__<serverName>__<rawName>` (or its deterministic normalized form) with the server-provided description and input schema. Under `cwdFromSession`, that set still comes from the fallback connection while each call is answered by the child for the calling session's directory. A successful re-sync — including the one after an automatic reconnect — replaces the generation; plugin disposal or an exhausted reconnect budget removes it.
 
 #### Token effect
 
@@ -188,6 +194,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 These limits describe what you cannot do with this plugin and when it needs operational attention. They are current package constraints, not a comparison with other MCP clients or a task backlog.
 
+- **One child per session working directory lives for the process lifetime** — `cwdFromSession` connections open on first use and close only when the plugin is disposed, so ending a session does not reap its child, and a deployment whose sessions visit many directories keeps one child per directory.
 - **Tools are the only bridged MCP capability** — Resources and Prompts have no harness consumer mechanism and are deferred.
 - **Startup and discovery timeouts are inherited from the MCP SDK** — the plugin exposes no connection or discovery timeout; each `initialize` and paginated `tools/list` request uses the SDK's 60-second request default, so an unresponsive server or cursor chain can delay both activation and teardown while the initial synchronization settles.
 - **Reconnect triggers on transport close** — a crashed stdio child fires it; Streamable HTTP failures surface per request through the SDK transport's own recovery, so an unreachable HTTP server is retried per call rather than respawned by the supervisor.

@@ -57,6 +57,7 @@ kind: "package-reference"
 | `transport` | 必填 | `stdio` 或 `streamable-http` |
 | `serverName` | 必填 | 服务器工具名称的 namespace；`[A-Za-z0-9_-]{1,32}`，在一个注册作用域内唯一 |
 | `command` / `args` / `env` / `cwd` | — | stdio：可执行文件、参数、合并到清洗过的环境之上的额外环境变量、工作目录 |
+| `cwdFromSession` | `false` | stdio：按会话工作目录各启动一个子进程，首次使用时创建；此时 `cwd` 成为无会话调用的回退目录 |
 | `url` / `headers` | — | streamable-http：端点 URL 与额外请求标头 |
 | `toolCallTimeoutMs` | `60,000` | 每次 `tools/call` 调用的超时 |
 | `failOnStartupError` | `false` | 初始连接或工具同步失败时拒绝插件激活 |
@@ -68,6 +69,10 @@ kind: "package-reference"
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-mcp-client)是每个受支持字段的穷尽式真源。
 
 启动后，服务器的工具会以 `mcp__<serverName>__<tool>` 形式出现——试着用一条提示词调用其中一个。如果初始连接失败，harness 仍会启动，但该服务器的工具不会出现，并会记录一条错误；设置 `failOnStartupError: true` 可让启动失败改为中止 harness。
+
+### 按会话使用工作目录
+
+如果 stdio 服务器从工作目录推导自身的项目身份——例如记忆或仓库服务器——默认情况下它看到的是 harness 进程的目录，而不是发起调用的会话所在目录。设置 `cwdFromSession: true` 可改为按会话工作目录各启动一个子进程：会话的首次调用会在该会话目录中启动一个子进程，同一目录的后续调用复用它，不带会话的调用使用 `cwd`。每个子进程保有各自的连接与重连状态，dispose 会关闭全部子进程。发布给模型的工具仍然来自回退连接，因此模型看到的工具集不取决于会话使用了哪些目录。
 
 ### 工具命名与共存
 
@@ -115,13 +120,14 @@ kind: "package-reference"
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：`Config` schema、`serverName` 预留、激活等待 |
 | [`src/connection.ts`](src/connection.ts) | 连接监督器：客户端世代、重连策略、尝试预算、dispose（资源释放） |
+| [`src/pool.ts`](src/pool.ts) | 按目录的连接池：发布工具的回退连接，以及每个会话工作目录一个的私有连接 |
 | [`src/tools.ts`](src/tools.ts) | 工具桥接：发现、命名、注册交换、执行、图片投影 |
 | [`src/transport.ts`](src/transport.ts) | 传输工厂：带清洗环境的 stdio spawn、Streamable HTTP |
 | — | 不发布运行时不变式伴生入口；MCP 世代会通过工具注册表发挥作用，但桥接在异步重新同步后不提供独立的服务器工具映射快照。 |
 
 ### 生命周期与同步
 
-`apply` 解析重连策略、在当前注册作用域内预留 `serverName`、启动监督器，并等待初始连接加发现完成。独立 agent（智能体）作用域可以复用相同 namespace，因为其工具与传输彼此隔离；同一作用域内重复会在加载时失败。监督器把所有同步——初始、通知与重连——串行到同一条队列，因此两次同步绝不会交错执行各自的先 dispose 后注册交换。dispose 会取消待执行的重连、关闭活动客户端、等待进行中的尝试与排队同步完全停稳，然后注销当前世代。
+`apply` 解析重连策略、在当前注册作用域内预留 `serverName`、启动监督器，并等待初始连接加发现完成。独立 agent（智能体）作用域可以复用相同 namespace，因为其工具与传输彼此隔离；同一作用域内重复会在加载时失败。处于 `cwdFromSession` 时，`apply` 改为启动该连接池：回退连接发布工具面，每个会话工作目录在其首次调用时获得一条私有连接，并随插件一同 dispose。监督器把所有同步——初始、通知与重连——串行到同一条队列，因此两次同步绝不会交错执行各自的先 dispose 后注册交换。dispose 会取消待执行的重连、关闭活动客户端、等待进行中的尝试与排队同步完全停稳，然后注销当前世代。
 
 监督器监听 `notifications/tools/list_changed` 并排队一次重新同步；获取阶段失败时保留上一世代注册，注册冲突则回滚本次尝试的世代。每次中断共享一个尝试预算：连续失败达到 `maxAttempts` 次后工具被注销、重连停止；连接存活超过 `maxDelayMs` 会重置预算。
 
@@ -157,7 +163,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-初始发现成功后，每个已声明的 MCP 工具都会显示为名为 `mcp__<serverName>__<rawName>`（或其确定性规范化形式）的原生工具，并携带服务器提供的描述与输入 schema。成功的重新同步——包括自动重连后的同步——会替换整个世代；对插件执行 dispose 或重连预算耗尽会移除该世代。
+初始发现成功后，每个已声明的 MCP 工具都会显示为名为 `mcp__<serverName>__<rawName>`（或其确定性规范化形式）的原生工具，并携带服务器提供的描述与输入 schema。处于 `cwdFromSession` 时，该工具集仍来自回退连接，而每次调用由调用会话所在目录的子进程应答。成功的重新同步——包括自动重连后的同步——会替换整个世代；对插件执行 dispose 或重连预算耗尽会移除该世代。
 
 #### Token 影响
 
@@ -188,6 +194,7 @@ kind: "package-reference"
 
 这些限制说明你无法用本插件做什么、以及何时需要运维注意。它们是当前包约束，不是与其他 MCP 客户端的对比，也不是任务积压。
 
+- **每个会话工作目录的子进程存活到进程结束**——`cwdFromSession` 连接在首次使用时打开，仅在插件被 dispose 时关闭，因此会话结束不会回收其子进程，会话访问过许多目录的部署会为每个目录保留一个子进程。
 - **只桥接 MCP 的工具能力**——资源与提示词没有 harness 消费机制，暂缓实现。
 - **启动与发现超时继承自 MCP SDK**——插件不暴露连接或发现超时；每次 `initialize` 与分页 `tools/list` 请求都使用 SDK 默认的 60 秒请求超时，因此无响应的服务器或 cursor chain 在初始同步完成期间可能同时延迟激活与 teardown。
 - **重连在传输关闭时触发**——崩溃的 stdio 子进程会触发重连；Streamable HTTP 失败按请求经 SDK 传输自身的恢复机制暴露，因此不可达的 HTTP 服务器会按调用重试，而非由 supervisor 重新 spawn。
