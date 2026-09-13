@@ -19,6 +19,7 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+import { startPool } from './pool.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
@@ -64,6 +65,13 @@ export interface StdioConfig {
   env: Record<string, string>
   /** Working directory for the child process. */
   cwd: string
+  /**
+   * Spawn one child per session working directory, created on first use
+   * (default `false`). When enabled, `cwd` is the fallback for calls without a
+   * session directory, and the tools discovered from that fallback connection
+   * are the published surface.
+   */
+  cwdFromSession: boolean
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -97,8 +105,8 @@ export interface StreamableHttpConfig {
 /** Configuration for one stdio or Streamable HTTP MCP server. */
 export type Config = StdioConfig | StreamableHttpConfig
 
-type StdioConfigInput = Omit<StdioConfig, 'args' | 'env' | 'cwd' | 'toolCallTimeoutMs' | 'failOnStartupError'>
-  & Partial<Pick<StdioConfig, 'args' | 'env' | 'cwd' | 'toolCallTimeoutMs' | 'failOnStartupError'>>
+type StdioConfigInput = Omit<StdioConfig, 'args' | 'env' | 'cwd' | 'cwdFromSession' | 'toolCallTimeoutMs' | 'failOnStartupError'>
+  & Partial<Pick<StdioConfig, 'args' | 'env' | 'cwd' | 'cwdFromSession' | 'toolCallTimeoutMs' | 'failOnStartupError'>>
 type StreamableHttpConfigInput = Omit<StreamableHttpConfig, 'headers' | 'toolCallTimeoutMs' | 'failOnStartupError'>
   & Partial<Pick<StreamableHttpConfig, 'headers' | 'toolCallTimeoutMs' | 'failOnStartupError'>>
 type ConfigInput = StdioConfigInput | StreamableHttpConfigInput
@@ -118,6 +126,7 @@ export const Config = z.union([
     args: z.array(String).default([]),
     env: z.dict(String).default({}),
     cwd: z.string().default(''),
+    cwdFromSession: z.boolean().default(false),
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
@@ -169,8 +178,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,
-  // quiesces in-flight work, and unregisters the current generation.
-  const connection = startConnection(ctx, config, reconnect)
+  // quiesces in-flight work, and unregisters the current generation. A
+  // per-session-directory stdio deployment instead gets the pool, which
+  // publishes the fallback connection's tools and serves each call from the
+  // child spawned in the calling session's directory.
+  const connection = config.transport === 'stdio' && config.cwdFromSession
+    ? startPool(ctx, config, reconnect)
+    : startConnection(ctx, config, reconnect)
 
   ctx.effect(() => {
     return () => connection.dispose()
