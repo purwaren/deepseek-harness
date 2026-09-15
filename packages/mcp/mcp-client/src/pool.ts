@@ -15,15 +15,16 @@
  * @module
  */
 
-import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { Client } from '@modelcontextprotocol/client'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { startConnection } from './connection.ts'
 import type { ConnectionHandle, ConnectionOutcome, ResolvedReconnectPolicy } from './connection.ts'
 import type { StdioConfig } from './index.ts'
+import type { ServerContext } from './server-context.ts'
 
 /** Handle for the stdio connections of one per-directory plugin instance. */
-export interface PoolHandle {
+export interface PoolHandle extends ServerContext {
   /** The publishing fallback connection's startup outcome; plugin activation awaits it. */
   ready: Promise<ConnectionOutcome>
   /**
@@ -81,6 +82,10 @@ export function startPool(ctx: Context, config: StdioConfig, policy: ResolvedRec
   return {
     ready: fallback.ready,
     resolveClient,
+    // The fallback connection is the tool surface's authority, so its
+    // resources and instructions are the pool's server context too.
+    resources: fallback.resources,
+    instructions: fallback.instructions,
     async dispose(): Promise<void> {
       // Every connection owns a child process and a reconnect timer: dispose
       // all of them before awaiting any, then await all, so teardown reaches

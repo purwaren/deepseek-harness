@@ -29,7 +29,6 @@ const mockState = vi.hoisted(() => {
         inputSchema: { type: 'object', properties: {} },
       },
     ],
-    nextCursor: undefined,
   }))
 
   /** stdio transport stand-in: keeps the config the bridge spawned it with. */
@@ -42,17 +41,17 @@ const mockState = vi.hoisted(() => {
 
   class MockClient {
     static instances: MockClient[] = []
+    transport: object | undefined = {}
     /** Working directory of the transport this client connected over. */
     transportCwd = ''
     closed = false
     onclose: (() => void) | undefined
-    constructor() {
+    constructor(_info: unknown, _options: { listChanged: { tools: { onChanged: () => void } } }) {
       MockClient.instances.push(this)
     }
-    setNotificationHandler(): void {
-      // The bridge registers a tool-list-changed handler only on the
-      // publishing connection; this fixture never emits one.
-    }
+    getServerCapabilities = () => ({ tools: {} })
+    getInstructions(): string | undefined { return undefined }
+    listResources = async () => ({ resources: [] })
     async connect(transport: { options?: Record<string, unknown> }): Promise<void> {
       const declared = transport.options?.cwd
       const cwd = typeof declared === 'string' ? declared : ''
@@ -65,28 +64,25 @@ const mockState = vi.hoisted(() => {
       // waits for that signal to prove a generation is gone.
       this.onclose?.()
     }
-    async request(request: { method: string; params?: Record<string, unknown> }): Promise<unknown> {
-      if (request.method === 'tools/list') return await listTools()
-      if (request.method === 'tools/call') {
-        // Answering with the serving child's directory is what makes routing
-        // observable from the tool result alone.
-        return { content: [{ type: 'text', text: `where@${this.transportCwd}` }] }
-      }
-      throw new Error(`unexpected MCP request: ${request.method}`)
+    listTools = listTools
+    // Answering with the serving child's directory is what makes routing
+    // observable from the tool result alone.
+    async callTool(): Promise<unknown> {
+      return { content: [{ type: 'text', text: `where@${this.transportCwd}` }] }
     }
   }
 
   return { failingCwds, listTools, MockClient, MockStdioClientTransport }
 })
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({ Client: mockState.MockClient }))
-
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
-  StdioClientTransport: mockState.MockStdioClientTransport,
+vi.mock('@modelcontextprotocol/client', async importOriginal => ({
+  ...await importOriginal<typeof import('@modelcontextprotocol/client')>(),
+  Client: mockState.MockClient,
+  StreamableHTTPClientTransport: vi.fn(),
 }))
 
-vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
-  StreamableHTTPClientTransport: vi.fn(),
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
+  StdioClientTransport: mockState.MockStdioClientTransport,
 }))
 
 // vi.mock is hoisted above static imports, so the module under test sees the

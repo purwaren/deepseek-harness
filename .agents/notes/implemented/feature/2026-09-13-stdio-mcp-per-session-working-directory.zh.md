@@ -12,7 +12,7 @@ Status: implemented
 
 `StdioConfig` 新增可选布尔字段 `cwdFromSession`，默认 `false`；Zod schema 施加该默认值，`apply()` 仅在 `transport: 'stdio'` 且该标志为真时选择连接池。启用时，插件不再启动单个受监管连接，而是启动 [`packages/mcp/mcp-client/src/pool.ts`](../../../../packages/mcp/mcp-client/src/pool.ts) 中的连接池。
 
-连接池持有一个发布用的 fallback 连接，外加每个会话工作目录一个私有连接，私有连接在来自该目录的首次调用时惰性创建。fallback 连接是以配置 `cwd` 建立的连接，也是工具门面的权威：它执行发现、注册 `mcp__<serverName>__<rawName>` 工具，并处理 `notifications/tools/list_changed`。私有连接传入 `publish: false`，因此它们服务于调用，共用同一个 `serverName` 与原始名称，却不注册第二份工具门面、不执行发现，也不安装自己的列表变更处理器。
+连接池持有一个发布用的 fallback 连接，外加每个会话工作目录一个私有连接，私有连接在来自该目录的首次调用时惰性创建。fallback 连接是以配置 `cwd` 建立的连接，也是工具门面的权威：它执行发现、注册 `mcp__<serverName>__<rawName>` 工具，并在 client 的列表变更订阅触发时重新同步。私有连接传入 `publish: false`，因此它们服务于调用，共用同一个 `serverName` 与原始名称，却不注册第二份工具门面、不执行发现，也不在列表变更时重新同步。`PoolHandle` 同时实现 `ServerContext`，将 `resources` 与 `instructions()` 委托给 fallback 连接，因此无论连接池打开了多少私有连接，`registerServerContext` 每个插件实例只发布一份资源提供方与一段归属说明文本。
 
 [`ConnectionOptions`](../../../../packages/mcp/mcp-client/src/connection.ts) 承载 `publish`（默认 `true`）与 `resolveClient`，`ConnectionHandle.liveClient()` 暴露当前代的 client，连接不可用时返回 `undefined`。[`packages/mcp/mcp-client/src/tools.ts`](../../../../packages/mcp/mcp-client/src/tools.ts) 中的 `ToolBridgeOptions.resolveClient` 让一个已发布的执行器按调用解析目标 client：连接池在每次执行时读取 `exec.agent?.session.header.cwd`，当该执行不带会话或不带会话目录时回退到配置 `cwd`，等待该连接的 `ready`，再把调用转发给它的活动 client。dispose 会先 dispose 全部连接再统一等待，因此插件拆卸会关闭 fallback 子进程与每一个私有子进程，并达到完全停稳。
 
@@ -40,6 +40,6 @@ Status: implemented
 
 `packages/mcp/mcp-client/tests/session-cwd.spec.ts`（mock 掉 MCP SDK）覆盖：路由到调用会话目录对应的子进程、对重复目录复用同一个子进程、位于 fallback 目录的会话以及不带会话的调用使用 fallback 目录、发布连接上恰好执行一次发现、无活动子进程时的失败，以及 dispose 关闭每一个子进程。
 
-`packages/mcp/mcp-client/tests/mcp-client.e2e.ts`（"spawns one child per session directory and reuses it"）通过 stdio 运行真实的 fixture 子进程；[`tests/fixture-server.ts`](../../../../packages/mcp/mcp-client/tests/fixture-server.ts) 中新增的 `where` 工具报告 `process.cwd()` 与 `process.pid`，证明两个会话目录得到各自目录中的不同子进程、重复目录复用同一子进程的 pid，以及不带会话的调用运行在配置的 fallback 中。包单元测试套件（112 个测试）通过，`tsc -b tsconfig.host.json` 通过，`packages/mcp/mcp-client/src` 的逐文件覆盖率为 100%。
+`packages/mcp/mcp-client/tests/mcp-client.e2e.ts`（"spawns one child per session directory and reuses it"）通过 stdio 运行真实的 fixture 子进程；[`tests/fixture-server.ts`](../../../../packages/mcp/mcp-client/tests/fixture-server.ts) 中新增的 `where` 工具报告 `process.cwd()` 与 `process.pid`，证明两个会话目录得到各自目录中的不同子进程、重复目录复用同一子进程的 pid，以及不带会话的调用运行在配置的 fallback 中。包单元测试套件（128 个测试）通过，`tsc -b tsconfig.host.json` 通过，`packages/mcp/mcp-client/src` 的逐文件覆盖率为 100%。
 
 一次仓库外的人工检查从三个工作目录通过该插件运行了真实的 `engram` MCP 服务器：每次调用都报告了各自的项目（`alpha-proj`、`beta-proj` 与 `frappe`），而配置的 fallback 连接仍报告 harness 检出目录。
