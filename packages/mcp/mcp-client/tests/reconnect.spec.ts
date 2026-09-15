@@ -97,6 +97,7 @@ function stdioConfig(reconnect?: Config['reconnect']): Config {
     args: [],
     env: {},
     cwd: '',
+    cwdFromSession: false,
     toolCallTimeoutMs: 60_000,
     failOnStartupError: false,
     ...reconnect === undefined ? {} : { reconnect },

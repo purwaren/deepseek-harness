@@ -30,6 +30,13 @@ export interface ToolBridgeOptions {
   registrationFailure: 'contain' | 'throw'
   serverName: string
   toolCallTimeoutMs: number
+  /**
+   * Resolve the client that serves one execution, awaited after the call's
+   * preconditions pass. A bridge that publishes one tool surface discovered
+   * from a fallback connection while serving calls from per-directory
+   * connections supplies this; omission pins every call to the discovery client.
+   */
+  resolveClient?: (exec: ToolExecution) => Promise<Client>
 }
 
 /** State for one sync generation: the current set of disposers keyed by public name. */
@@ -135,10 +142,16 @@ export async function syncTools(
       inputSchema: tool.inputSchema,
       outputSchema: tool.outputSchema,
       taskRequired: tool.execution?.taskSupport === 'required',
-      call: (args, execution) => client.callTool(
-        { name: tool.name, arguments: args },
-        { signal: execution.signal, timeout: opts.toolCallTimeoutMs, toolDefinition: tool },
-      ),
+      // A per-directory bridge resolves the child that serves this caller;
+      // the fallback bridge stays bound to the generation that discovered
+      // the tools.
+      call: async (args, execution) => {
+        const target = opts.resolveClient === undefined ? client : await opts.resolveClient(execution)
+        return target.callTool(
+          { name: tool.name, arguments: args },
+          { signal: execution.signal, timeout: opts.toolCallTimeoutMs, toolDefinition: tool },
+        )
+      },
     }))
   }
 

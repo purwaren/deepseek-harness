@@ -75,6 +75,7 @@ const stdioConfig: Config = {
   args: [],
   env: {},
   cwd: '',
+  cwdFromSession: false,
   toolCallTimeoutMs: 60_000,
   failOnStartupError: false,
 }

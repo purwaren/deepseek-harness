@@ -1627,6 +1627,13 @@ export interface StdioConfig {
   env: Record<string, string>
   /** Working directory for the child process. */
   cwd: string
+  /**
+   * Spawn one child per session working directory, created on first use
+   * (default `false`). When enabled, `cwd` is the fallback for calls without a
+   * session directory, and the tools discovered from that fallback connection
+   * are the published surface.
+   */
+  cwdFromSession: boolean
   /** Timeout per tool call or resource request in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -1674,7 +1681,7 @@ export interface ReconnectConfig {
 }
 ```
 
-来源：[`packages/mcp/mcp-client/src/index.ts:104`](../packages/mcp/mcp-client/src/index.ts)
+来源：[`packages/mcp/mcp-client/src/index.ts:112`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 

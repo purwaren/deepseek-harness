@@ -20,6 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { assertNever, type JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ServerContext } from './server-context.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
@@ -108,11 +109,35 @@ export interface ConnectionHandle extends ServerContext {
    */
   ready: Promise<ConnectionOutcome>
   /**
+   * The live client of the current generation, or `undefined` while the
+   * connection is down (reconnecting or after its attempt budget ran out).
+   * A pool uses this to route a call after awaiting {@link ready}.
+   */
+  liveClient(): Client | undefined
+  /**
    * Stop reconnection, close the negotiating transport or live client, wait
    * for the in-flight attempt and queued tool syncs to quiesce, then
    * unregister every tool this server still owns.
    */
   dispose(): Promise<void>
+}
+
+/**
+ * What one supervised connection contributes beyond staying connected.
+ */
+export interface ConnectionOptions {
+  /**
+   * Publish the server's discovered tools into the harness registry (default
+   * `true`). A per-directory pool keeps exactly one publishing connection as
+   * the tool surface's authority and gives the rest `publish: false`, so they
+   * serve calls without contesting the same public names.
+   */
+  publish?: boolean
+  /**
+   * Serve every published call from the client this resolves instead of the
+   * publishing generation. Only a pool that owns several connections passes it.
+   */
+  resolveClient?: (exec: ToolExecution) => Promise<Client>
 }
 
 /**
@@ -122,15 +147,23 @@ export interface ConnectionHandle extends ServerContext {
  * @param ctx - Cordis context providing the `tools` registry and logger.
  * @param config - Resolved plugin config selecting the transport and server identity.
  * @param policy - Resolved reconnect policy from {@link resolveReconnectPolicy}.
+ * @param options - Whether this connection publishes tools and which client serves its calls.
  * @returns Handle with a `ready` promise for startup-await and a `dispose` for teardown.
  */
-export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
+export function startConnection(
+  ctx: Context,
+  config: Config,
+  policy: ResolvedReconnectPolicy,
+  options: ConnectionOptions = {},
+): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
   const incompleteDisposalMessage = `${label}: transport closure could not be confirmed during disposal — server shutdown may be incomplete`
+  const publish = options.publish ?? true
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
     toolCallTimeoutMs: config.toolCallTimeoutMs,
+    ...options.resolveClient === undefined ? {} : { resolveClient: options.resolveClient },
   }
   // The initial sync uses 'throw' when failOnStartupError is configured, so
   // a registration conflict propagates to the startup-await path. Re-syncs
@@ -293,12 +326,17 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       }
       return !attached || hasClosed() || await waitForClose(closed.promise)
     }
+    // The Client constructor above wires this into every list-changed
+    // notification. A private pool connection has no tool surface of its
+    // own, so a list change there is not a resync trigger.
     async function refreshTools(): Promise<void> {
-      if (!isCurrent(generation)) return
+      if (!isCurrent(generation) || !publish) return
       ctx.logger.info(`${label}: tool list changed, re-syncing`)
       try {
         await enqueueSync(generation)
       } catch (error) {
+        // Fetch-phase failure: the previous generation is still registered
+        // and `disposers` still owns it — keep serving the last good list.
         if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${String(error)}`)
       }
     }
@@ -320,7 +358,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       if (Buffer.byteLength(instructions) > maxInstructionBytes) {
         throw new Error(`${label}: server instructions exceed maxInstructionBytes (${maxInstructionBytes})`)
       }
-      await enqueueSync(generation, startup ? startupOpts : opts)
+      if (publish) await enqueueSync(generation, startup ? startupOpts : opts)
     } catch (error) {
       if (firstAttemptError === undefined) firstAttemptError = error
       // Disposal clears current ownership before it closes the generation, so
@@ -385,6 +423,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         }
       },
     },
+    liveClient: () => client,
     async dispose(): Promise<void> {
       disposed = true
       serverInstructions = ''

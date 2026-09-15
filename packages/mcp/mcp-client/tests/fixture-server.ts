@@ -31,6 +31,14 @@ function createFixtureServer(): McpServer {
     content: [{ type: 'text', text: `Hello, ${args.name}!` }],
   }))
 
+  server.registerTool('where', {
+    title: 'Where Tool',
+    description: 'Reports the working directory and process id of this server process.',
+    inputSchema: z.object({}),
+  }, async (): Promise<CallToolResult> => ({
+    content: [{ type: 'text', text: JSON.stringify({ cwd: process.cwd(), pid: process.pid }) }],
+  }))
+
   server.registerTool('fail', {
     title: 'Fail Tool',
     description: 'Always returns an error.',

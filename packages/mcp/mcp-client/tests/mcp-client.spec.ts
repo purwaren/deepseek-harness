@@ -1029,6 +1029,7 @@ describe('createTransport', () => {
       args: ['server.js'],
       env: {},
       cwd: '/tmp',
+      cwdFromSession: false,
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
     }
@@ -1083,6 +1084,7 @@ describe('createTransport', () => {
         args: [],
         env: { EXTRA: 'injected' },
         cwd: '',
+        cwdFromSession: false,
         toolCallTimeoutMs: 60_000,
         failOnStartupError: false,
       }
@@ -1109,6 +1111,7 @@ describe('createTransport', () => {
       args: [],
       env: { CUSTOM: 'value' },
       cwd: '',
+      cwdFromSession: false,
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
     }
